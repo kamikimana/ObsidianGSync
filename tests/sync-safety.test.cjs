@@ -27,7 +27,7 @@ mod._compile(code, filename + ".js");
 const { runSync } = mod.exports;
 const buffer = (b) => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
 
-function fixture(localFiles, remoteFiles, state = {}, propagateDeletes = true) {
+function fixture(localFiles, remoteFiles, state = {}, propagateDeletes = true, overrides = {}) {
   const local = new Map(localFiles.map(([p, t, m = 100]) => [p, new TFile(p, t, m)]));
   const remote = new Map();
   const payloads = new Map();
@@ -94,6 +94,8 @@ function fixture(localFiles, remoteFiles, state = {}, propagateDeletes = true) {
   } } };
   const settings = { maxFileSizeMB: 25, excludes: "", remoteFolder: "Obsidian/Notes", propagateDeletes };
   const hooks = { checkpoint: async () => {}, progress: () => {} };
+  Object.assign(drive, overrides.drive ?? {});
+  Object.assign(vault, overrides.vault ?? {});
   return { local, remote, changes, run: () => runSync(app, drive, settings, state, hooks) };
 }
 test("missing remote root content stops before any deletion", async () => {
@@ -138,4 +140,58 @@ test("deletion sync disabled restores missing remote file", async () => {
     "note.md": { remoteId: "old", remoteRev: "r0", localMtime: 100, localSize: 5 }
   }, false);
   assert.equal((await s.run()).uploaded, 1);
+});
+
+test("empty local vault stops before mass remote deletion", async () => {
+  const s = fixture([], [["note.md", "remote"]], {
+    "note.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 6 }
+  });
+  await assert.rejects(s.run(), /Safety stop: the local vault/);
+  assert.deepEqual(s.changes, []);
+  assert.equal(s.remote.has("note.md"), true);
+});
+
+test("empty local vault still downloads when deletion propagation is disabled", async () => {
+  const s = fixture([], [["note.md", "remote"]], {
+    "note.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 6 }
+  }, false);
+  assert.equal((await s.run()).downloaded, 1);
+  assert.equal(s.local.get("note.md").data.toString(), "remote");
+});
+
+test("local edit during download prevents stale remote overwrite", async () => {
+  let s;
+  s = fixture([["note.md", "original"]], [["note.md", "remote", "r2"]], {
+    "note.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 8 }
+  }, true, { drive: { download: async () => {
+    const f = s.local.get("note.md");
+    f.data = Buffer.from("user edit");
+    f.stat = { mtime: 200, size: 9 };
+    return buffer(Buffer.from("remote"));
+  } } });
+  const result = await s.run();
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0], /changed during download/);
+  assert.equal(s.local.get("note.md").data.toString(), "user edit");
+  assert.deepEqual(s.changes, []);
+});
+
+test("local edit before remote deletion prevents trashing changed file", async () => {
+  let s;
+  s = fixture([["keep.md", "keep"], ["note.md", "original"]], [["keep.md", "keep"]], {
+    "keep.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 4 },
+    "note.md": { remoteId: "old", remoteRev: "r1", localMtime: 100, localSize: 8 }
+  }, true, { vault: { adapter: { stat: async p => {
+    if (p === "note.md") {
+      const f = s.local.get(p);
+      f.data = Buffer.from("user edit");
+      f.stat = { mtime: 200, size: 9 };
+    }
+    return s.local.get(p)?.stat ?? null;
+  } } } });
+  const result = await s.run();
+  assert.equal(result.deletedLocal, 0);
+  assert.equal(result.errors.length, 1);
+  assert.equal(s.local.get("note.md").data.toString(), "user edit");
+  assert.deepEqual(s.changes, []);
 });
