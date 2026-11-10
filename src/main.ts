@@ -50,7 +50,7 @@ export default class GSyncPlugin extends Plugin {
 
     this.app.workspace.onLayoutReady(() => {
       if (this.interruptedLastTime) {
-        new Notice("GSync: the last sync didn't finish (Obsidian closed or crashed). Auto-sync on startup was skipped. Progress was saved, so tap Sync now to resume.", 15000);
+        new Notice("GSync: the last sync didn't finish (Obsidian closed or crashed). Auto-sync on startup was skipped. Progress was saved, so use the Sync now command to resume.", 15000);
         return;
       }
       if (this.settings.syncOnStartup && this.settings.refreshToken) {
@@ -91,7 +91,7 @@ export default class GSyncPlugin extends Plugin {
   startSignIn(): void {
     const p = this.prepared;
     if (!p || !p.url.includes(encodeURIComponent(this.settings.clientId)) || p.pending.redirectUri !== this.settings.redirectUri) {
-      new Notice("Preparing sign-in… tap Sign in with Google again in a moment.");
+      new Notice("Preparing sign-in… tap the Sign in with Google button again in a moment.");
       void this.prepareSignInLink();
       return;
     }
