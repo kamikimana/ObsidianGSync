@@ -61,6 +61,7 @@ function fixture(localFiles, remoteFiles, state = {}, propagateDeletes = true, o
     ensureFolderPath: async () => "root",
     listTree: async () => ({ files: new Map(remote), folders: new Map([["", "root"]]), warnings: [] }),
     download: async id => buffer(payloads.get(id)),
+    getFile: async id => [...remote.values()].find(r => r.id === id),
     createFolder: async (name, parent) => parent + "/" + name,
     createFile: async (name, parent, bytes) => {
       const p = (parent === "root" ? "" : parent.slice(5) + "/") + name;
@@ -311,4 +312,79 @@ test("checkpoint failure aborts further transfers and resumed sync finishes with
   assert.equal(s.remote.size, 11);
   assert.equal(Object.keys(s.state).length, 11);
   assert.equal(s.changes.filter(([action]) => action === "createRemote").length, 11);
+});
+
+test("remote deletion concurrent with local edit restores changed local file", async () => {
+  const s = fixture([["keep.md", "keep"], ["note.md", "edited", 200]], [["keep.md", "keep"]], {
+    "keep.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 4 },
+    "note.md": { remoteId: "old", remoteRev: "r1", localMtime: 100, localSize: 8 }
+  });
+  const result = await s.run();
+  assert.equal(result.uploaded, 1);
+  assert.equal(result.deletedLocal, 0);
+  assert.equal(s.local.get("note.md").data.toString(), "edited");
+  assert.equal(s.remote.has("note.md"), true);
+});
+
+test("local deletion concurrent with remote edit restores changed remote file", async () => {
+  const s = fixture([["keep.md", "keep"]], [["keep.md", "keep"], ["note.md", "remote-new", "r2"]], {
+    "keep.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 4 },
+    "note.md": { remoteId: "id2", remoteRev: "r1", localMtime: 100, localSize: 8 }
+  });
+  const result = await s.run();
+  assert.equal(result.downloaded, 1);
+  assert.equal(result.deletedRemote, 0);
+  assert.equal(s.local.get("note.md").data.toString(), "remote-new");
+});
+
+test("fresh Drive metadata prevents trashing a remotely edited file", async () => {
+  const s = fixture([["keep.md", "keep"]], [["keep.md", "keep"], ["note.md", "remote", "r1"]], {
+    "keep.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 4 },
+    "note.md": { remoteId: "id2", remoteRev: "r1", localMtime: 100, localSize: 6 }
+  }, true, { drive: { getFile: async id => ({ id, md5Checksum: "r2" }) } });
+  const result = await s.run();
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0], /Drive file changed/);
+  assert.equal(result.deletedRemote, 0);
+  assert.equal(s.remote.has("note.md"), true);
+});
+
+test("new local file appearing during download is not overwritten", async () => {
+  let s;
+  s = fixture([["keep.md", "keep"]], [["keep.md", "keep"], ["note.md", "remote", "r2"]], {
+    "keep.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 4 },
+    "note.md": { remoteId: "id2", remoteRev: "r1", localMtime: 100, localSize: 6 }
+  }, true, { drive: { download: async () => {
+    s.local.set("note.md", new TFile("note.md", "new-local", 200));
+    return buffer(Buffer.from("remote"));
+  } } });
+  const result = await s.run();
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0], /appeared during download/);
+  assert.equal(s.local.get("note.md").data.toString(), "new-local");
+  assert.equal(s.changes.some(([action]) => action === "modifyLocal"), false);
+});
+
+test("duplicate Drive names stop sync before any writes", async () => {
+  const s = fixture([["note.md", "local", 200]], [["note.md", "remote", "r2"]], {
+    "note.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 5 }
+  });
+  const listTree = s.drive.listTree;
+  s.drive.listTree = async id => ({
+    ...await listTree(id),
+    warnings: ["Duplicate name in Drive, ignoring extra copy: note.md"]
+  });
+  await assert.rejects(s.run(), /Safety stop: duplicate names/);
+  assert.deepEqual(s.changes, []);
+});
+
+test("replacement remote file with same checksum is not deleted by stale state", async () => {
+  const s = fixture([["keep.md", "keep"]], [["keep.md", "keep"], ["note.md", "remote", "r1"]], {
+    "keep.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 4 },
+    "note.md": { remoteId: "old-id", remoteRev: "r1", localMtime: 100, localSize: 6 }
+  });
+  const result = await s.run();
+  assert.equal(result.deletedRemote, 0);
+  assert.equal(result.downloaded, 1);
+  assert.equal(s.local.get("note.md").data.toString(), "remote");
 });
