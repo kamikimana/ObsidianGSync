@@ -164,6 +164,14 @@ export async function runSync(
       !!current && current.mtime === stat.mtime && current.size === stat.size;
   };
 
+  const assertRemoteUnchanged = async (r: RemoteFile) => {
+    const fresh = await drive.getFile(r.id);
+    if (fresh.id !== r.id || fresh.trashed || rev(fresh) !== rev(r) ||
+        (fresh.name && fresh.name !== r.name)) {
+      throw new Error("Drive file changed since listing; skipped overwrite to protect newer edits.");
+    }
+  };
+
   const ensureRemoteParent = async (path: string): Promise<string> => {
     const parts = path.split("/").slice(0, -1);
     let cur = "";
@@ -227,6 +235,7 @@ export async function runSync(
     if (!(await stillMatches(path, l, snapshot.stat))) {
       throw new Error("Local file changed during conflict backup; original Drive file was not overwritten. Retry sync.");
     }
+    await assertRemoteUnchanged(r);
     const updated = await drive.updateFile(r.id, ld);
     await record(path, updated, snapshot.stat);
     res.conflicts.push(path);
@@ -269,6 +278,7 @@ export async function runSync(
         if (lChanged && rChanged) await resolveBothChanged(path, l, r);
         else if (lChanged) {
           const snapshot = await readLocalSnapshot(path, l);
+          await assertRemoteUnchanged(r);
           const updated = await drive.updateFile(r.id, snapshot.data);
           await record(path, updated, snapshot.stat);
           res.uploaded++;
@@ -289,11 +299,22 @@ export async function runSync(
           res.downloaded++;
         }
       } else if (l && !r) {
+        // Check the previously tracked ID before treating an absent list entry
+        // as deleted or uploading a duplicate under the same name.
+        // A true 404 can be re-uploaded if deletions are disabled, but must
+        // never cause local deletion when deletion propagation is enabled.
+        let fresh: RemoteFile | null = null;
+        if (s) {
+          try {
+            fresh = await drive.getFile(s.remoteId);
+          } catch (e) {
+            if (!(e instanceof Error) || !e.message.startsWith("Drive API 404:")) throw e;
+          }
+          if (fresh && fresh.trashed !== true) {
+            throw new Error("Drive file is missing from the listing but still exists; skipped to avoid duplicate upload or local deletion.");
+          }
+        }
         if (s && settings.propagateDeletes && !localChangedSince(l, s)) {
-          // Absence from Drive's list is NOT proof of deletion. Listings may
-          // temporarily omit items; only propagate a confirmed trash action.
-          // Ambiguous 404/permission errors also preserve the local copy.
-          const fresh = await drive.getFile(s.remoteId);
           if (!fresh || fresh.trashed !== true) {
             throw new Error("Drive did not confirm the file is in trash; local copy preserved.");
           }
