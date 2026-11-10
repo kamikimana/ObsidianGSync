@@ -48,7 +48,11 @@ export class DriveClient {
         headers: { Authorization: `Bearer ${token}` },
         throw: false,
       });
-      if ((r.status === 429 || r.status >= 500) && attempt < 4) {
+      // Only retry reads. A POST may already have created a file even when
+      // Drive returns an error, and blindly retrying can create duplicates.
+      // Mutations must be reconciled against a fresh tree on the next sync.
+      if ((opts.method ?? "GET") === "GET" &&
+          (r.status === 429 || r.status >= 500) && attempt < 4) {
         await sleep(1000 * 2 ** attempt);
         continue;
       }
