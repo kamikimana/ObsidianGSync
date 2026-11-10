@@ -59,3 +59,51 @@ test("Drive GET HTTP 503 is retried and eventually succeeds", async () => {
   assert.equal(requests.length, 3);
   assert.ok(requests.every(r => r.method === "GET"));
 });
+
+test("Drive GET network rejection is retried, but writes are never replayed", async () => {
+  let attempt = 0;
+  const drive = setup(() => {
+    if (++attempt < 3) throw new Error("socket disconnected");
+    return { status: 200, json: { files: [] } };
+  });
+  assert.deepEqual(await drive.listChildren("root"), []);
+  assert.equal(requests.length, 3);
+  assert.ok(requests.every(r => r.method === "GET"));
+
+  const unsafe = setup(() => { throw new Error("socket disconnected"); });
+  await assert.rejects(unsafe.createFolder("new", "root"), /socket disconnected/);
+  assert.equal(requests.length, 1);
+});
+
+test("Drive file list pagination includes short intermediate pages", async () => {
+  const drive = setup(opts => {
+    const token = new URL(opts.url).searchParams.get("pageToken");
+    return token
+      ? { status: 200, json: { files: [{ id: "two", name: "second.md" }] } }
+      : { status: 200, json: { files: [{ id: "one", name: "first.md" }], nextPageToken: "page-two" } };
+  });
+  const files = await drive.listChildren("root");
+  assert.deepEqual(files.map(f => f.id), ["one", "two"]);
+  assert.equal(requests.length, 2);
+  assert.ok(requests[0].url.includes("incompleteSearch"));
+});
+
+test("Drive incompleteSearch aborts instead of treating missing files as deletions", async () => {
+  const drive = setup(() => ({ status: 200, json: { files: [], incompleteSearch: true } }));
+  await assert.rejects(drive.listChildren("root"), /listing is incomplete/);
+});
+
+test("Drive listTree detects duplicate folder names", async () => {
+  const drive = setup(opts => {
+    const folderId = new URL(opts.url).searchParams.get("q");
+    if (folderId.includes("'root'")) {
+      return { status: 200, json: { files: [
+        { id: "folder1", name: "Folder", mimeType: "application/vnd.google-apps.folder" },
+        { id: "folder2", name: "Folder", mimeType: "application/vnd.google-apps.folder" }
+      ] } };
+    }
+    return { status: 200, json: { files: [] } };
+  });
+  const tree = await drive.listTree("root");
+  assert.deepEqual(tree.warnings, ["Duplicate folder name in Drive: Folder"]);
+});
