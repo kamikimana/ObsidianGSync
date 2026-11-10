@@ -157,7 +157,7 @@ export class GSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Auto-sync every (minutes)")
-      .setDesc("0 turns auto-sync off.")
+      .setDesc("Set to 0 to turn auto-sync off.")
       .addText((t) =>
         t.setValue(String(s.autoSyncMinutes)).onChange(async (v) => {
           const n = Math.max(0, parseInt(v, 10) || 0);
@@ -176,7 +176,7 @@ export class GSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Sync deletions")
-      .setDesc("Deleting a note on one side moves it to the trash on the other (Drive trash / Obsidian trash). Off = deleted files come back on next sync.")
+      .setDesc("Deleting a note on one side moves it to the trash on the other (Drive trash / Obsidian trash). When off, deleted files come back on the next sync.")
       .addToggle((t) =>
         t.setValue(s.propagateDeletes).onChange(async (v) => {
           s.propagateDeletes = v;
