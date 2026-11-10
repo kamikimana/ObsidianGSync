@@ -94,11 +94,17 @@ export async function runSync(
   res.warnings.push(...tree.warnings);
   // Drive allows multiple files with the same name in one folder. Choosing an
   // arbitrary copy could overwrite the wrong version or propagate deletions.
-  const duplicatePrefix = "Duplicate name in Drive, ignoring extra copy: ";
+  const unsafePrefixes = [
+    "Duplicate name in Drive, ignoring extra copy: ",
+    "Duplicate folder name in Drive: ",
+    "File/folder name collision in Drive: ",
+  ];
   const duplicates = tree.warnings
-    .filter((w) => w.startsWith(duplicatePrefix))
-    .map((w) => w.slice(duplicatePrefix.length))
-    .filter((path) => !isExcluded(path, rules, configDir));
+    .map((w) => {
+      const prefix = unsafePrefixes.find((p) => w.startsWith(p));
+      return prefix ? w.slice(prefix.length) : null;
+    })
+    .filter((path): path is string => path !== null && !isExcluded(path, rules, configDir));
   if (duplicates.length) {
     throw new Error(
       `Safety stop: duplicate names in the Drive sync folder (${duplicates.slice(0, 5).join(", ")}). Resolve duplicates before syncing.`
@@ -284,6 +290,13 @@ export async function runSync(
         }
       } else if (l && !r) {
         if (s && settings.propagateDeletes && !localChangedSince(l, s)) {
+          // Absence from Drive's list is NOT proof of deletion. Listings may
+          // temporarily omit items; only propagate a confirmed trash action.
+          // Ambiguous 404/permission errors also preserve the local copy.
+          const fresh = await drive.getFile(s.remoteId);
+          if (!fresh || fresh.trashed !== true) {
+            throw new Error("Drive did not confirm the file is in trash; local copy preserved.");
+          }
           // A file may change while a sync is running. Recheck the adapter's
           // latest metadata before propagating a remote deletion.
           const latest = await vault.adapter.stat(path);
