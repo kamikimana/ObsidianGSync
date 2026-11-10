@@ -92,6 +92,18 @@ export async function runSync(
   const rootId = await drive.ensureFolderPath(settings.remoteFolder);
   const tree: RemoteTree = await drive.listTree(rootId);
   res.warnings.push(...tree.warnings);
+  // Drive allows multiple files with the same name in one folder. Choosing an
+  // arbitrary copy could overwrite the wrong version or propagate deletions.
+  const duplicatePrefix = "Duplicate name in Drive, ignoring extra copy: ";
+  const duplicates = tree.warnings
+    .filter((w) => w.startsWith(duplicatePrefix))
+    .map((w) => w.slice(duplicatePrefix.length))
+    .filter((path) => !isExcluded(path, rules, configDir));
+  if (duplicates.length) {
+    throw new Error(
+      `Safety stop: duplicate names in the Drive sync folder (${duplicates.slice(0, 5).join(", ")}). Resolve duplicates before syncing.`
+    );
+  }
 
   const local = new Map<string, TFile>();
   for (const f of vault.getFiles()) if (!isExcluded(f.path, rules, configDir)) local.set(f.path, f);
@@ -288,12 +300,25 @@ export async function runSync(
           res.uploaded++;
         }
       } else if (!l && r) {
-        if (s && settings.propagateDeletes && rev(r) === s.remoteRev) {
+        if (s && settings.propagateDeletes && r.id === s.remoteId && rev(r) === s.remoteRev) {
+          // The local file may have reappeared, or Drive may have been edited
+          // after listTree. Never trash a newly changed copy based on stale data.
+          if (vault.getAbstractFileByPath(path) || await vault.adapter.stat(path)) {
+            throw new Error("Local file reappeared during sync; skipped remote deletion. Retry sync.");
+          }
+          const fresh = await drive.getFile(r.id);
+          if (fresh.id !== s.remoteId || rev(fresh) !== s.remoteRev) {
+            throw new Error("Drive file changed during sync; skipped remote deletion. Retry sync.");
+          }
           await drive.trash(r.id); // deleted here -> move to Drive trash
           delete state[path];
           res.deletedRemote++;
         } else {
-          await writeLocal(path, await drive.download(r.id));
+          const bytes = await drive.download(r.id);
+          if (vault.getAbstractFileByPath(path) || await vault.adapter.stat(path)) {
+            throw new Error("Local file appeared during download; skipped overwrite. Retry sync.");
+          }
+          await writeLocal(path, bytes);
           await record(path, r);
           res.downloaded++;
         }
