@@ -46,7 +46,11 @@ export class GSyncSettingTab extends PluginSettingTab {
         if (!("name" in row)) continue;
         const setting = new Setting(containerEl).setName(row.name);
         if (row.desc) setting.setDesc(row.desc);
-        if ("render" in row && row.render) row.render(setting);
+        if ("render" in row && row.render) {
+          // Legacy callbacks only use Setting; the new API also passes SettingGroup.
+          const renderLegacy = row.render as (setting: Setting) => void;
+          renderLegacy(setting);
+        }
       }
     }
   }
