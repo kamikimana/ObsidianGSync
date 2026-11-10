@@ -17,12 +17,12 @@ export default defineConfig([
         brands: [
           "Android", "Chrome", "GSync", "Google", "Google Cloud",
           "Google Cloud Console", "Google Drive", "GitHub", "My Drive",
-          "Obsidian", "PayPal", "Safari", "Windows",
+          "Obsidian", "OAuth", "PayPal", "Safari", "Windows",
         ],
         acronyms: [
           "API", "HTTP", "HTTPS", "URL", "DNS", "TCP", "IP", "SSH", "TLS", "SSL",
           "FTP", "SFTP", "SMTP", "JSON", "XML", "HTML", "CSS", "PDF", "CSV", "YAML",
-          "SQL", "PNG", "JPG", "JPEG", "GIF", "SVG", "2FA", "MFA", "OAuth", "JWT",
+          "SQL", "PNG", "JPG", "JPEG", "GIF", "SVG", "2FA", "MFA", "JWT",
           "LDAP", "SAML", "SDK", "IDE", "CLI", "GUI", "CRUD", "REST", "SOAP",
           "CPU", "GPU", "RAM", "SSD", "USB", "UI", "OK", "RSS", "S3",
           "ID", "UUID", "GUID", "SHA", "MD5", "ASCII", "UTF-8", "UTF-16",
