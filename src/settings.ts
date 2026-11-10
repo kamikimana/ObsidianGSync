@@ -37,6 +37,10 @@ export class GSyncSettingTab extends PluginSettingTab {
 
   /** Legacy Obsidian (<1.13): reuse the same settings definitions and handlers. */
   display(): void {
+    this.renderLegacy();
+  }
+
+  private renderLegacy(): void {
     const { containerEl } = this;
     containerEl.empty();
     for (const group of this.getSettingDefinitions()) {
@@ -57,8 +61,11 @@ export class GSyncSettingTab extends PluginSettingTab {
 
   /** Refresh either the declarative (1.13+) or legacy settings UI. */
   refresh(): void {
-    if (typeof this.update === "function") this.update();
-    else this.display();
+    // Use the new API when present, without referencing a 1.13-only member
+    // on the Obsidian base type (this plugin still supports 1.6.6).
+    const modernTab = this as { update?: () => void };
+    if (typeof modernTab.update === "function") modernTab.update();
+    else this.renderLegacy();
   }
 
   // Reuse the same render callbacks on old and new Obsidian versions.
