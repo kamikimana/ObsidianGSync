@@ -3,7 +3,7 @@ import { requestUrl, RequestUrlResponse } from "obsidian";
 const API = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 export const FOLDER_MIME = "application/vnd.google-apps.folder";
-const FIELDS = "id,name,mimeType,md5Checksum,modifiedTime,size";
+const FIELDS = "id,name,mimeType,md5Checksum,modifiedTime,size,trashed";
 
 export interface RemoteFile {
   id: string;
@@ -12,6 +12,7 @@ export interface RemoteFile {
   md5Checksum?: string;
   modifiedTime: string;
   size?: string;
+  trashed?: boolean;
 }
 
 export interface RemoteTree {
@@ -23,6 +24,7 @@ export interface RemoteTree {
 interface FileList {
   files: RemoteFile[];
   nextPageToken?: string;
+  incompleteSearch?: boolean;
 }
 
 function q(s: string): string {
@@ -40,14 +42,23 @@ export class DriveClient {
   ): Promise<RequestUrlResponse> {
     for (let attempt = 0; ; attempt++) {
       const token = await this.getToken();
-      const r = await requestUrl({
-        url,
-        method: opts.method ?? "GET",
-        body: opts.body,
-        contentType: opts.contentType,
-        headers: { Authorization: `Bearer ${token}` },
-        throw: false,
-      });
+      let r: RequestUrlResponse;
+      try {
+        r = await requestUrl({
+          url,
+          method: opts.method ?? "GET",
+          body: opts.body,
+          contentType: opts.contentType,
+          headers: { Authorization: `Bearer ${token}` },
+          throw: false,
+        });
+      } catch (e) {
+        // requestUrl can reject on a network failure before an HTTP status exists.
+        // GET is safe to retry; never replay an uncertain POST/PATCH.
+        if ((opts.method ?? "GET") !== "GET" || attempt >= 4) throw e;
+        await sleep(1000 * 2 ** attempt);
+        continue;
+      }
       // Only retry reads. A POST may already have created a file even when
       // Drive returns an error, and blindly retrying can create duplicates.
       // Mutations must be reconciled against a fresh tree on the next sync.
@@ -75,13 +86,14 @@ export class DriveClient {
     do {
       const params = new URLSearchParams({
         q: `'${q(folderId)}' in parents and trashed = false`,
-        fields: `nextPageToken, files(${FIELDS})`,
+        fields: `nextPageToken,incompleteSearch,files(${FIELDS})`,
         pageSize: "1000",
         spaces: "drive",
       });
       if (pageToken) params.set("pageToken", pageToken);
       const r = await this.req(`${API}/files?${params.toString()}`);
       const body = r.json as FileList;
+      if (body.incompleteSearch) throw new Error("Drive file listing is incomplete; stopped to prevent unsafe synchronization.");
       out.push(...body.files);
       pageToken = body.nextPageToken ?? "";
     } while (pageToken);
@@ -123,7 +135,11 @@ export class DriveClient {
       for (const f of await this.listChildren(id)) {
         const path = prefix ? `${prefix}/${f.name}` : f.name;
         if (f.mimeType === FOLDER_MIME) {
-          if (!folders.has(path)) {
+          if (folders.has(path)) {
+            warnings.push(`Duplicate folder name in Drive: ${path}`);
+          } else if (files.has(path)) {
+            warnings.push(`File/folder name collision in Drive: ${path}`);
+          } else {
             folders.set(path, f.id);
             queue.push([path, f.id]);
           }
@@ -131,6 +147,8 @@ export class DriveClient {
           continue; // Google Docs/Sheets etc. can't be downloaded as files
         } else if (files.has(path)) {
           warnings.push(`Duplicate name in Drive, ignoring extra copy: ${path}`);
+        } else if (folders.has(path)) {
+          warnings.push(`File/folder name collision in Drive: ${path}`);
         } else {
           files.set(path, f);
         }
