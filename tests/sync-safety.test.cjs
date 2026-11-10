@@ -96,7 +96,8 @@ function fixture(localFiles, remoteFiles, state = {}, propagateDeletes = true, o
   const hooks = { checkpoint: async () => {}, progress: () => {} };
   Object.assign(drive, overrides.drive ?? {});
   Object.assign(vault, overrides.vault ?? {});
-  return { local, remote, changes, run: () => runSync(app, drive, settings, state, hooks) };
+  Object.assign(hooks, overrides.hooks ?? {});
+  return { local, remote, drive, state, hooks, changes, run: () => runSync(app, drive, settings, state, hooks) };
 }
 test("missing remote root content stops before any deletion", async () => {
   const s = fixture([["note.md", "important"]], [], { "note.md": { remoteId: "old", remoteRev: "r0", localMtime: 100, localSize: 9 } });
@@ -194,4 +195,120 @@ test("local edit before remote deletion prevents trashing changed file", async (
   assert.equal(result.errors.length, 1);
   assert.equal(s.local.get("note.md").data.toString(), "user edit");
   assert.deepEqual(s.changes, []);
+});
+
+test("network failure during download leaves local data and state unchanged, then retry succeeds", async () => {
+  const state = { "note.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 5 } };
+  const s = fixture([["note.md", "local"]], [["note.md", "remote", "r2"]], state);
+  const download = s.drive.download;
+  let failOnce = true;
+  s.drive.download = async id => {
+    if (failOnce) { failOnce = false; throw new Error("network disconnected"); }
+    return download(id);
+  };
+  const first = await s.run();
+  assert.equal(first.errors.length, 1);
+  assert.equal(s.local.get("note.md").data.toString(), "local");
+  assert.equal(state["note.md"].remoteRev, "r1");
+  assert.deepEqual(s.changes, []);
+  const second = await s.run();
+  assert.equal(second.errors.length, 0);
+  assert.equal(second.downloaded, 1);
+  assert.equal(s.local.get("note.md").data.toString(), "remote");
+});
+
+test("network failure during remote trash retains remote file and retries safely", async () => {
+  const state = {
+    "keep.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 4 },
+    "gone.md": { remoteId: "id2", remoteRev: "r1", localMtime: 100, localSize: 6 }
+  };
+  const s = fixture([["keep.md", "keep"]], [["keep.md", "keep"], ["gone.md", "remote"]], state);
+  const trash = s.drive.trash;
+  let failOnce = true;
+  s.drive.trash = async id => {
+    if (failOnce) { failOnce = false; throw new Error("network disconnected"); }
+    return trash(id);
+  };
+  const first = await s.run();
+  assert.equal(first.errors.length, 1);
+  assert.equal(s.remote.has("gone.md"), true);
+  assert.ok(state["gone.md"]);
+  assert.equal((await s.run()).deletedRemote, 1);
+  assert.equal(s.remote.has("gone.md"), false);
+});
+
+test("edit during existing-file upload is not marked as synced", async () => {
+  const state = { "note.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 8 } };
+  const s = fixture([["note.md", "first", 200]], [["note.md", "original", "r1"]], state);
+  const update = s.drive.updateFile;
+  let editOnce = true;
+  s.drive.updateFile = async (id, data) => {
+    const r = await update(id, data);
+    if (editOnce) {
+      editOnce = false;
+      const f = s.local.get("note.md");
+      f.data = Buffer.from("second");
+      f.stat = { mtime: 300, size: 6 };
+    }
+    return r;
+  };
+  assert.equal((await s.run()).uploaded, 1);
+  assert.equal(state["note.md"].localMtime, 200);
+  assert.equal((await s.run()).uploaded, 1);
+  assert.equal(state["note.md"].localMtime, 300);
+});
+
+test("edit during first upload remains pending and is uploaded on retry", async () => {
+  const s = fixture([["note.md", "first"]], []);
+  const create = s.drive.createFile;
+  let editOnce = true;
+  s.drive.createFile = async (name, parent, data) => {
+    const r = await create(name, parent, data);
+    if (editOnce) {
+      editOnce = false;
+      const f = s.local.get("note.md");
+      f.data = Buffer.from("second");
+      f.stat = { mtime: 200, size: 6 };
+    }
+    return r;
+  };
+  assert.equal((await s.run()).uploaded, 1);
+  assert.equal(s.state["note.md"].localMtime, 100);
+  assert.equal((await s.run()).uploaded, 1);
+  assert.equal(s.state["note.md"].localMtime, 200);
+});
+
+test("failed conflict backup upload never overwrites either original", async () => {
+  const state = { "note.md": { remoteId: "id1", remoteRev: "r0", localMtime: 100, localSize: 8 } };
+  const s = fixture([["note.md", "local-new", 200]], [["note.md", "remote-new", "r1"]], state);
+  const create = s.drive.createFile;
+  let failOnce = true;
+  s.drive.createFile = async (...args) => {
+    if (failOnce) { failOnce = false; throw new Error("network disconnected"); }
+    return create(...args);
+  };
+  const first = await s.run();
+  assert.equal(first.errors.length, 1);
+  assert.equal(s.local.get("note.md").data.toString(), "local-new");
+  assert.equal(Buffer.from(await s.drive.download("id1")).toString(), "remote-new");
+  assert.equal(s.changes.some(([action, p]) => action === "updateRemote" && p === "note.md"), false);
+  const second = await s.run();
+  assert.equal(second.errors.length, 0);
+  assert.deepEqual(second.conflicts, ["note.md"]);
+  assert.equal(Buffer.from(await s.drive.download("id1")).toString(), "local-new");
+  assert.equal([...s.local.keys()].some(p => p.includes("(conflict ")), true);
+});
+
+test("checkpoint failure aborts further transfers and resumed sync finishes without duplicates", async () => {
+  const names = Array.from({ length: 11 }, (_, i) => [`file-${String(i).padStart(2, "0")}.md`, "content"]);
+  const s = fixture(names, [], {}, true, { hooks: { checkpoint: async () => { throw new Error("storage unavailable"); } } });
+  await assert.rejects(s.run(), /storage unavailable/);
+  assert.equal(s.remote.size, 10);
+  assert.equal(Object.keys(s.state).length, 10);
+  s.hooks.checkpoint = async () => {};
+  const result = await s.run();
+  assert.equal(result.errors.length, 0);
+  assert.equal(s.remote.size, 11);
+  assert.equal(Object.keys(s.state).length, 11);
+  assert.equal(s.changes.filter(([action]) => action === "createRemote").length, 11);
 });
