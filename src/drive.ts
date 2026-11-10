@@ -135,6 +135,11 @@ export class DriveClient {
     return { files, folders, warnings };
   }
 
+  async getFile(id: string): Promise<RemoteFile> {
+    const r = await this.req(`${API}/files/${encodeURIComponent(id)}?fields=${FIELDS}`);
+    return r.json as RemoteFile;
+  }
+
   async download(id: string): Promise<ArrayBuffer> {
     const r = await this.req(`${API}/files/${id}?alt=media`);
     return r.arrayBuffer;
