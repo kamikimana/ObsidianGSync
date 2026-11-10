@@ -158,6 +158,8 @@ export default class GSyncPlugin extends Plugin {
   }
 
   async sync(quiet: boolean) {
+    // After a crash, require a manual review before any timer/startup sync.
+    if (quiet && this.interruptedLastTime) return;
     if (this.syncing) {
       if (!quiet) new Notice("Sync already running.");
       return;
@@ -169,11 +171,13 @@ export default class GSyncPlugin extends Plugin {
     }
     this.syncing = true;
     this.syncInProgress = true;
-    this.interruptedLastTime = false;
-    await this.saveAll();
-    this.setStatus("GSync: syncing…");
     let progressNotice: Notice | null = null;
+    let completionSaved = false;
     try {
+      // If this write fails, do not start any transfers.
+      await this.saveAll();
+      this.interruptedLastTime = false;
+      this.setStatus("GSync: syncing…");
       const r = await runSync(this.app, this.drive, s, this.state, {
         checkpoint: () => this.saveAll(),
         progress: (done, total, transferred) => {
@@ -188,6 +192,7 @@ export default class GSyncPlugin extends Plugin {
       });
       this.syncInProgress = false;
       await this.saveAll();
+      completionSaved = true;
       const parts: string[] = [];
       if (r.uploaded) parts.push(`↑${r.uploaded}`);
       if (r.downloaded) parts.push(`↓${r.downloaded}`);
@@ -214,10 +219,16 @@ export default class GSyncPlugin extends Plugin {
       new Notice(`GSync failed: ${(e as Error).message}`, 15000);
     } finally {
       (progressNotice as Notice | null)?.hide();
-      if (this.syncInProgress) {
-        // Failed with an error (not a crash): nothing to resume-warn about.
+      if (!completionSaved) {
         this.syncInProgress = false;
-        await this.saveAll();
+        try {
+          await this.saveAll();
+        } catch (e) {
+          // A failed checkpoint must not permanently lock the plugin's sync flag.
+          this.setStatus("GSync: error");
+          console.error("[gsync] could not save sync state", e);
+          new Notice("GSync: could not save sync state. Check storage before retrying.", 15000);
+        }
       }
       this.syncing = false;
     }
