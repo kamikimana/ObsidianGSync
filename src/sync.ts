@@ -101,10 +101,20 @@ export async function runSync(
   // Fail closed until the user confirms the folder and resets sync state.
   const trackedPaths = Object.keys(state).filter((p) => !isExcluded(p, rules, configDir));
   const visibleRemoteCount = [...remote.keys()].filter((p) => !isExcluded(p, rules, configDir)).length;
-  if (settings.propagateDeletes && trackedPaths.length > 0 && local.size > 0 && visibleRemoteCount === 0) {
-    throw new Error(
-      `Safety stop: the Drive sync folder has no syncable files, but ${trackedPaths.length} previously synced file(s) are recorded. Check the Drive folder and backups before resetting sync state.`
-    );
+  if (settings.propagateDeletes && trackedPaths.length > 0) {
+    if (local.size > 0 && visibleRemoteCount === 0) {
+      throw new Error(
+        `Safety stop: the Drive sync folder has no syncable files, but ${trackedPaths.length} previously synced file(s) are recorded. Check the Drive folder and backups before resetting sync state.`
+      );
+    }
+    // An unexpectedly empty local vault would otherwise trash every tracked
+    // Drive file. Require explicit investigation rather than guessing that
+    // the user intentionally deleted all notes.
+    if (local.size === 0 && visibleRemoteCount > 0) {
+      throw new Error(
+        `Safety stop: the local vault has no syncable files, but ${trackedPaths.length} previously synced file(s) are recorded. Check the vault and backups before resetting sync state.`
+      );
+    }
   }
 
   // ---- helpers ------------------------------------------------------------
@@ -215,12 +225,29 @@ export async function runSync(
           await record(path, updated);
           res.uploaded++;
         } else if (rChanged) {
-          await writeLocal(path, await drive.download(r.id));
+          // Download can take seconds. Do not overwrite an edit made locally
+          // while the remote bytes were in flight.
+          const beforeMtime = l.stat.mtime;
+          const beforeSize = l.stat.size;
+          const bytes = await drive.download(r.id);
+          const current = vault.getAbstractFileByPath(path);
+          const latest = await vault.adapter.stat(path);
+          if (!(current instanceof TFile) || !latest ||
+              latest.mtime !== beforeMtime || latest.size !== beforeSize) {
+            throw new Error("Local file changed during download; skipped overwrite. Retry sync to preserve both versions.");
+          }
+          await writeLocal(path, bytes);
           await record(path, r);
           res.downloaded++;
         }
       } else if (l && !r) {
         if (s && settings.propagateDeletes && !localChangedSince(l, s)) {
+          // A file may change while a sync is running. Recheck the adapter's
+          // latest metadata before propagating a remote deletion.
+          const latest = await vault.adapter.stat(path);
+          if (!latest || latest.mtime !== s.localMtime || latest.size !== s.localSize) {
+            throw new Error("Local file changed during sync; skipped deletion. Retry sync.");
+          }
           await app.fileManager.trashFile(l); // deleted in Drive -> delete here
           delete state[path];
           res.deletedLocal++;
