@@ -198,10 +198,14 @@ export default class GSyncPlugin extends Plugin {
       if (r.downloaded) parts.push(`↓${r.downloaded}`);
       if (r.deletedLocal + r.deletedRemote) parts.push(`🗑${r.deletedLocal + r.deletedRemote}`);
       if (r.conflicts.length) parts.push(`⚠ ${r.conflicts.length} conflict(s)`);
-      const summary = parts.length ? parts.join(" ") : "up to date";
-      this.setStatus(`GSync: ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} ${r.errors.length ? "⚠" : "✓"}`);
+      const incomplete = r.errors.length > 0 || r.skipped.length > 0;
+      const detail = parts.length ? ` — ${parts.join(" ")}` : "";
+      const summary = incomplete
+        ? `incomplete (${r.errors.length} failed, ${r.skipped.length} skipped)${detail}`
+        : (parts.length ? parts.join(" ") : "up to date");
+      this.setStatus(`GSync: ${incomplete ? "incomplete" : new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) + " ✓"}`);
 
-      if (!quiet || parts.length || r.errors.length) new Notice(`GSync: ${summary}`);
+      if (!quiet || parts.length || incomplete) new Notice(`GSync: ${summary}`, incomplete ? 15000 : 5000);
       if (r.conflicts.length) {
         new Notice(`Both sides changed; Drive's version saved as a "(conflict …)" copy:\n${r.conflicts.slice(0, 5).join("\n")}`, 15000);
       }
