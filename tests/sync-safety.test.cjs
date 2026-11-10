@@ -403,7 +403,7 @@ test("incomplete Drive listing cannot trash a local file that still exists remot
   const result = await s.run();
   assert.equal(result.deletedLocal, 0);
   assert.equal(result.errors.length, 1);
-  assert.match(result.errors[0], /did not confirm.*trash/);
+  assert.match(result.errors[0], /missing from the listing/);
   assert.equal(s.local.get("note.md").data.toString(), "important");
 });
 
@@ -431,3 +431,44 @@ for (const warning of [
     assert.deepEqual(s.changes, []);
   });
 }
+
+test("incomplete Drive listing cannot create duplicates when deletion sync is off", async () => {
+  const s = fixture([["keep.md", "keep"], ["note.md", "important"]], [["keep.md", "keep"], ["note.md", "important"]], {
+    "keep.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 4 },
+    "note.md": { remoteId: "id2", remoteRev: "r1", localMtime: 100, localSize: 9 }
+  }, false);
+  const listTree = s.drive.listTree;
+  s.drive.listTree = async id => {
+    const tree = await listTree(id);
+    tree.files.delete("note.md");
+    return tree;
+  };
+  const result = await s.run();
+  assert.equal(result.uploaded, 0);
+  assert.equal(result.errors.length, 1);
+  assert.equal(s.changes.some(([action]) => action === "createRemote"), false);
+  assert.equal(s.remote.size, 2);
+});
+
+test("a newer remote edit after listing blocks local-only upload", async () => {
+  const s = fixture([["note.md", "local-new", 200]], [["note.md", "remote-original", "r1"]], {
+    "note.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 15 }
+  }, false, { drive: { getFile: async id => ({ id, name: "note.md", md5Checksum: "r2" }) } });
+  const result = await s.run();
+  assert.equal(result.uploaded, 0);
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0], /changed since listing/);
+  assert.equal(s.local.get("note.md").data.toString(), "local-new");
+  assert.deepEqual(s.changes, []);
+});
+
+test("a newer remote edit during conflict backup cannot be overwritten", async () => {
+  const s = fixture([["note.md", "local-new", 200]], [["note.md", "remote-new", "r2"]], {
+    "note.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 9 }
+  }, false, { drive: { getFile: async id => ({ id, name: "note.md", md5Checksum: "r3" }) } });
+  const result = await s.run();
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0], /changed since listing/);
+  assert.equal(s.changes.some(([action]) => action === "updateRemote"), false);
+  assert.equal(s.local.get("note.md").data.toString(), "local-new");
+});
