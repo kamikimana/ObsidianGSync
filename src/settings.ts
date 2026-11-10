@@ -145,7 +145,7 @@ export class GSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Google Drive folder")
-      .setDesc('Path under "My Drive", e.g. Obsidian/Notes. Created if it does not exist.')
+      .setDesc('Path under "My Drive", for example Obsidian/Notes. Created if it does not exist.')
       .addText((t) =>
         t.setValue(s.remoteFolder).onChange(async (v) => {
           const next = v.trim().replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/^\/+|\/+$/g, "");
@@ -176,7 +176,7 @@ export class GSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Sync deletions")
-      .setDesc("Deleting a note on one side moves it to the trash on the other (Drive trash / Obsidian trash). When off, deleted files come back on the next sync.")
+      .setDesc("Deleting a note on one side moves it to the trash on the other (Google Drive trash / Obsidian trash). When off, deleted files come back on the next sync.")
       .addToggle((t) =>
         t.setValue(s.propagateDeletes).onChange(async (v) => {
           s.propagateDeletes = v;
