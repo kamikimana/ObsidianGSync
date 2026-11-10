@@ -61,7 +61,7 @@ function fixture(localFiles, remoteFiles, state = {}, propagateDeletes = true, o
     ensureFolderPath: async () => "root",
     listTree: async () => ({ files: new Map(remote), folders: new Map([["", "root"]]), warnings: [] }),
     download: async id => buffer(payloads.get(id)),
-    getFile: async id => [...remote.values()].find(r => r.id === id),
+    getFile: async id => [...remote.values()].find(r => r.id === id) ?? { id, trashed: true },
     createFolder: async (name, parent) => parent + "/" + name,
     createFile: async (name, parent, bytes) => {
       const p = (parent === "root" ? "" : parent.slice(5) + "/") + name;
@@ -388,3 +388,46 @@ test("replacement remote file with same checksum is not deleted by stale state",
   assert.equal(result.downloaded, 1);
   assert.equal(s.local.get("note.md").data.toString(), "remote");
 });
+
+test("incomplete Drive listing cannot trash a local file that still exists remotely", async () => {
+  const s = fixture([["keep.md", "keep"], ["note.md", "important"]], [["keep.md", "keep"], ["note.md", "important"]], {
+    "keep.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 4 },
+    "note.md": { remoteId: "id2", remoteRev: "r1", localMtime: 100, localSize: 9 }
+  });
+  const listTree = s.drive.listTree;
+  s.drive.listTree = async id => {
+    const tree = await listTree(id);
+    tree.files.delete("note.md"); // API search omitted an existing file
+    return tree;
+  };
+  const result = await s.run();
+  assert.equal(result.deletedLocal, 0);
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0], /did not confirm.*trash/);
+  assert.equal(s.local.get("note.md").data.toString(), "important");
+});
+
+test("ambiguous Drive 404 cannot cause local deletion", async () => {
+  const s = fixture([["keep.md", "keep"], ["note.md", "important"]], [["keep.md", "keep"]], {
+    "keep.md": { remoteId: "id1", remoteRev: "r1", localMtime: 100, localSize: 4 },
+    "note.md": { remoteId: "gone-id", remoteRev: "r1", localMtime: 100, localSize: 9 }
+  }, true, { drive: { getFile: async () => { throw new Error("Drive API 404"); } } });
+  const result = await s.run();
+  assert.equal(result.deletedLocal, 0);
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0], /Drive API 404/);
+  assert.equal(s.local.has("note.md"), true);
+});
+
+for (const warning of [
+  "Duplicate folder name in Drive: Folder",
+  "File/folder name collision in Drive: Folder"
+]) {
+  test(`unsafe Drive folder listing (${warning}) stops before transfer`, async () => {
+    const s = fixture([["new.md", "important"]], []);
+    const listTree = s.drive.listTree;
+    s.drive.listTree = async id => ({ ...await listTree(id), warnings: [warning] });
+    await assert.rejects(s.run(), /Safety stop: duplicate names/);
+    assert.deepEqual(s.changes, []);
+  });
+}
