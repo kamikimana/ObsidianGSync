@@ -118,10 +118,32 @@ export async function runSync(
   }
 
   // ---- helpers ------------------------------------------------------------
-  const record = async (path: string, r: RemoteFile) => {
-    const st = await vault.adapter.stat(path);
+  const record = async (path: string, r: RemoteFile, snapshot?: { mtime: number; size: number }) => {
+    const st = snapshot ?? await vault.adapter.stat(path);
     if (!st) return;
     state[path] = { remoteId: r.id, remoteRev: rev(r), localMtime: st.mtime, localSize: st.size };
+  };
+
+  // Record the metadata of the bytes actually read, not the metadata of a
+  // later local edit that may occur while a Drive upload is in flight.
+  const readLocalSnapshot = async (path: string, file: TFile) => {
+    const before = await vault.adapter.stat(path);
+    if (!before || vault.getAbstractFileByPath(path) !== file) {
+      throw new Error("Local file disappeared before upload; skipped.");
+    }
+    const data = await vault.readBinary(file);
+    const after = await vault.adapter.stat(path);
+    if (!after || vault.getAbstractFileByPath(path) !== file ||
+        before.mtime !== after.mtime || before.size !== after.size) {
+      throw new Error("Local file changed while reading; skipped upload. Retry sync.");
+    }
+    return { data, stat: { mtime: after.mtime, size: after.size } };
+  };
+
+  const stillMatches = async (path: string, file: TFile, stat: { mtime: number; size: number }) => {
+    const current = await vault.adapter.stat(path);
+    return vault.getAbstractFileByPath(path) === file &&
+      !!current && current.mtime === stat.mtime && current.size === stat.size;
   };
 
   const ensureRemoteParent = async (path: string): Promise<string> => {
@@ -167,9 +189,13 @@ export async function runSync(
   const localChangedSince = (f: TFile, s: SyncRecord) => f.stat.mtime !== s.localMtime || f.stat.size !== s.localSize;
 
   const resolveBothChanged = async (path: string, l: TFile, r: RemoteFile) => {
-    const [ld, rd] = await Promise.all([vault.readBinary(l), drive.download(r.id)]);
+    const [snapshot, rd] = await Promise.all([readLocalSnapshot(path, l), drive.download(r.id)]);
+    const ld = snapshot.data;
     if (sameBytes(ld, rd)) {
-      await record(path, r);
+      if (!(await stillMatches(path, l, snapshot.stat))) {
+        throw new Error("Local file changed during comparison; skipped. Retry sync.");
+      }
+      await record(path, r, snapshot.stat);
       return;
     }
     // Keep both: local wins the original name, Drive's version is saved beside it.
@@ -180,8 +206,11 @@ export async function runSync(
     const cRemote = await uploadNew(cPath, rd);
     remote.set(cPath, cRemote);
     await record(cPath, cRemote);
+    if (!(await stillMatches(path, l, snapshot.stat))) {
+      throw new Error("Local file changed during conflict backup; original Drive file was not overwritten. Retry sync.");
+    }
     const updated = await drive.updateFile(r.id, ld);
-    await record(path, updated);
+    await record(path, updated, snapshot.stat);
     res.conflicts.push(path);
   };
 
@@ -221,8 +250,9 @@ export async function runSync(
         const rChanged = rev(r) !== s.remoteRev || r.id !== s.remoteId;
         if (lChanged && rChanged) await resolveBothChanged(path, l, r);
         else if (lChanged) {
-          const updated = await drive.updateFile(r.id, await vault.readBinary(l));
-          await record(path, updated);
+          const snapshot = await readLocalSnapshot(path, l);
+          const updated = await drive.updateFile(r.id, snapshot.data);
+          await record(path, updated, snapshot.stat);
           res.uploaded++;
         } else if (rChanged) {
           // Download can take seconds. Do not overwrite an edit made locally
@@ -252,8 +282,9 @@ export async function runSync(
           delete state[path];
           res.deletedLocal++;
         } else {
-          const created = await uploadNew(path, await vault.readBinary(l));
-          await record(path, created);
+          const snapshot = await readLocalSnapshot(path, l);
+          const created = await uploadNew(path, snapshot.data);
+          await record(path, created, snapshot.stat);
           res.uploaded++;
         }
       } else if (!l && r) {
