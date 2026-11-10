@@ -9,17 +9,38 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
       - run: npm ci
+      - name: Check production dependency audit
+        run: npm audit --omit=dev --audit-level=moderate
+      - name: Summarize full dependency audit
+        run: |
+          status=0
+          npm audit --json > audit-report.json || status=$?
+          if [ "$status" -gt 1 ]; then
+            echo "npm audit failed to complete (exit: $status)" >&2
+            exit "$status"
+          fi
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const report = JSON.parse(fs.readFileSync('audit-report.json', 'utf8'));
+          console.log('Full audit totals:', JSON.stringify(report.metadata?.vulnerabilities || {}));
+          for (const [name, item] of Object.entries(report.vulnerabilities || {})) {
+            const via = (item.via || []).map(v => typeof v === 'string' ? v : `${v.name} [${v.range}]`).join(', ');
+            console.log(JSON.stringify({name, severity: item.severity, isDirect: item.isDirect, range: item.range, via, effects: item.effects, fixAvailable: item.fixAvailable}));
+          }
+          NODE
       - run: npm test
       - run: npm run build
       - run: npm run lint
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: gsync-safety-android-test
           path: |
