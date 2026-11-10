@@ -1,0 +1,61 @@
+// Verify that transient Drive API errors cannot duplicate write requests.
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const Module = require("node:module");
+const ts = require("typescript");
+
+let handler;
+let requests = [];
+const filename = path.resolve(__dirname, "../src/drive.ts");
+const code = ts.transpileModule(fs.readFileSync(filename, "utf8"), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
+}).outputText;
+const mod = new Module(filename, module);
+mod.require = name => name === "obsidian" ? {
+  requestUrl: async opts => {
+    requests.push(opts);
+    return handler(opts);
+  }
+} : require(name);
+mod._compile(code, filename + ".js");
+const { DriveClient } = mod.exports;
+global.window = { setTimeout: callback => { callback(); return 1; } };
+
+function setup(fn) {
+  requests = [];
+  handler = fn;
+  return new DriveClient(async () => "token");
+}
+
+test("folder creation HTTP 503 is not blindly retried", async () => {
+  const drive = setup(() => ({ status: 503, text: "temporary failure" }));
+  await assert.rejects(drive.createFolder("notes", "root"), /Drive API 503/);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, "POST");
+});
+
+test("file creation HTTP 503 is not blindly retried", async () => {
+  const drive = setup(() => ({ status: 503, text: "temporary failure" }));
+  await assert.rejects(drive.createFile("note.md", "root", new ArrayBuffer(2)), /Drive API 503/);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, "POST");
+});
+
+test("file update HTTP 503 is not blindly retried", async () => {
+  const drive = setup(() => ({ status: 503, text: "temporary failure" }));
+  await assert.rejects(drive.updateFile("id1", new ArrayBuffer(2)), /Drive API 503/);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, "PATCH");
+});
+
+test("Drive GET HTTP 503 is retried and eventually succeeds", async () => {
+  let attempt = 0;
+  const drive = setup(() => ++attempt < 3
+    ? { status: 503, text: "temporary failure" }
+    : { status: 200, json: { files: [] } });
+  assert.deepEqual(await drive.listChildren("root"), []);
+  assert.equal(requests.length, 3);
+  assert.ok(requests.every(r => r.method === "GET"));
+});
