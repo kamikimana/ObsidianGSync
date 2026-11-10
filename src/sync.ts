@@ -58,17 +58,22 @@ function sameBytes(a: ArrayBuffer, b: ArrayBuffer): boolean {
   return true;
 }
 
-function conflictPath(path: string): string {
+function conflictPath(path: string, occupied: (candidate: string) => boolean): string {
   const d = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}${pad(d.getMinutes())}`;
+  const pad = (n: number, width = 2) => String(n).padStart(width, "0");
+  const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}-${pad(d.getMilliseconds(), 3)}`;
   const slash = path.lastIndexOf("/");
   const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
   const file = path.slice(slash + 1);
   const dot = file.lastIndexOf(".");
   const base = dot > 0 ? file.slice(0, dot) : file;
   const ext = dot > 0 ? file.slice(dot) : "";
-  return `${dir}${base} (conflict ${stamp})${ext}`;
+  for (let n = 0; n < 10000; n++) {
+    const suffix = n ? `-${n}` : "";
+    const candidate = `${dir}${base} (conflict ${stamp}${suffix})${ext}`;
+    if (!occupied(candidate)) return candidate;
+  }
+  throw new Error(`Couldn't allocate an unused conflict file name for ${path}`);
 }
 
 export async function runSync(
@@ -91,6 +96,16 @@ export async function runSync(
   const local = new Map<string, TFile>();
   for (const f of vault.getFiles()) if (!isExcluded(f.path, rules, configDir)) local.set(f.path, f);
   const remote = tree.files;
+
+  // A removed/recreated Drive root would otherwise look like a mass deletion.
+  // Fail closed until the user confirms the folder and resets sync state.
+  const trackedPaths = Object.keys(state).filter((p) => !isExcluded(p, rules, configDir));
+  const visibleRemoteCount = [...remote.keys()].filter((p) => !isExcluded(p, rules, configDir)).length;
+  if (settings.propagateDeletes && trackedPaths.length > 0 && local.size > 0 && visibleRemoteCount === 0) {
+    throw new Error(
+      `Safety stop: the Drive sync folder has no syncable files, but ${trackedPaths.length} previously synced file(s) are recorded. Check the Drive folder and backups before resetting sync state.`
+    );
+  }
 
   // ---- helpers ------------------------------------------------------------
   const record = async (path: string, r: RemoteFile) => {
@@ -148,9 +163,12 @@ export async function runSync(
       return;
     }
     // Keep both: local wins the original name, Drive's version is saved beside it.
-    const cPath = conflictPath(path);
+    const cPath = conflictPath(path, (candidate) =>
+      !!vault.getAbstractFileByPath(candidate) || remote.has(candidate) || candidate in state
+    );
     await writeLocal(cPath, rd);
     const cRemote = await uploadNew(cPath, rd);
+    remote.set(cPath, cRemote);
     await record(cPath, cRemote);
     const updated = await drive.updateFile(r.id, ld);
     await record(path, updated);
